@@ -1,9 +1,12 @@
 from importlib import resources
 
+import numpy as np
 import pytest
 from astropy import units as u
 from astropy.table import QTable, unique
+from click import UsageError
 
+from ... import missions
 from .. import app
 from . import data
 
@@ -85,6 +88,7 @@ def run_scheduler(fits_path, ecsv_path, gif_path, run_cli, request):
 def test_end_to_end_no_solution(run_scheduler):
     table = run_scheduler("--timelimit=1s", "--exptime-min=5hour", "--cutoff=0.1")
     assert len(table) == 0
+    assert not table.meta["has_solution"]
     assert table.meta["solution_status"].startswith("aborted")
     assert table.meta["objective_value"] == pytest.approx(0, abs=1e-7)
     assert table.meta["total_time"]["slack"] == 6 * u.hour
@@ -93,6 +97,8 @@ def test_end_to_end_no_solution(run_scheduler):
 def test_end_to_end_solution(run_scheduler):
     table = run_scheduler("--timelimit=1min", "--exptime-min=300s")
     assert len(table) >= 3
+    assert table.meta["has_observable_fields"]
+    assert table.meta["has_solution"]
 
 
 def test_fixed_exptime_with_appmag_dist(fits_path, ecsv_path, run_cli):
@@ -116,3 +122,150 @@ def test_fixed_exptime_with_appmag_dist(fits_path, ecsv_path, run_cli):
         # Notably: no --no-appmag-dist and no --absmag-mean
     )
     assert result.exit_code == 0
+
+
+def test_nothing_observable_is_not_a_failed_solve(fits_path, ecsv_path, run_cli):
+    """An empty schedule says whether anything was observable at all."""
+    result = run_cli(
+        app,
+        "schedule",
+        fits_path,
+        ecsv_path,
+        "--mission=uvex",
+        "--bandpass=NUV",
+        "--nside=32",
+        "--deadline=1s",
+        "--timelimit=10s",
+        "--no-appmag-dist",
+    )
+    assert result.exit_code == 0
+    meta = QTable.read(ecsv_path).meta
+    assert not meta["has_observable_fields"]
+    assert not meta["has_solution"]
+
+
+def test_solver_gave_up_is_not_an_unobservable_sky(fits_path, ecsv_path, run_cli):
+    """A solve that finds nothing is distinguishable from an unobservable sky."""
+    result = run_cli(
+        app,
+        "schedule",
+        fits_path,
+        ecsv_path,
+        "--mission=uvex",
+        "--bandpass=NUV",
+        "--nside=32",
+        "--deadline=4hour",
+        "--timelimit=20s",
+        "--no-appmag-dist",
+        "--cutoff=0.999",
+    )
+    assert result.exit_code == 0
+    meta = QTable.read(ecsv_path).meta
+    assert meta["has_observable_fields"]
+    assert not meta["has_solution"]
+
+
+def test_field_index_identifies_the_sky_grid_row(run_scheduler):
+    """Each observation names the sky grid row it points at."""
+    table = run_scheduler("--timelimit=1min", "--exptime-min=300s")
+    observations = table[table["action"] == "observe"]
+    assert len(observations) > 0
+
+    mission = getattr(missions, table.meta["args"]["mission"])
+    grid = mission.skygrid
+    if isinstance(grid, dict):
+        grid = grid[table.meta["args"]["skygrid"]]
+    indices = np.asarray(observations["field_index"])
+    assert np.all(indices >= 0)
+    separation = grid[indices].separation(observations["target_coord"])
+    np.testing.assert_allclose(separation.deg, 0, atol=1e-9)
+
+    # A slew belongs to no field.
+    assert np.all(np.asarray(table[table["action"] == "slew"]["field_index"]) == -1)
+
+
+@pytest.fixture
+def skymap_without_gps_time(tmp_path):
+    """A sky map generated locally, which carries no trigger time."""
+    import astropy_healpix as ah
+    from ligo.skymap.io import write_sky_map
+
+    path = str(tmp_path / "nogps.fits")
+    npix = ah.nside_to_npix(8)
+    write_sky_map(path, np.full(npix, 1 / npix), moc=False, nest=True)
+    return path
+
+
+def test_event_time_required_when_absent_from_sky_map(
+    skymap_without_gps_time, ecsv_path, run_cli
+):
+    """A sky map with no trigger time says how to supply one."""
+    with pytest.raises(UsageError, match="--event-time"):
+        run_cli(app, "schedule", skymap_without_gps_time, ecsv_path, "--mission=uvex")
+
+
+def test_event_time_option_supplies_the_trigger_time(
+    skymap_without_gps_time, ecsv_path, run_cli
+):
+    """--event-time schedules a sky map that carries no trigger time."""
+    result = run_cli(
+        app,
+        "schedule",
+        skymap_without_gps_time,
+        ecsv_path,
+        "--mission=uvex",
+        "--bandpass=NUV",
+        "--nside=32",
+        "--deadline=2hour",
+        "--timelimit=10s",
+        "--no-appmag-dist",
+        "--event-time=2026-03-01T00:00:00",
+    )
+    assert result.exit_code == 0
+    assert QTable.read(ecsv_path).meta["args"]["event_time"] == (
+        "2026-03-01T00:00:00.000"
+    )
+
+
+def test_event_time_overrides_the_sky_map(fits_path, ecsv_path, run_cli):
+    """An explicit trigger time takes precedence over the sky map header."""
+    result = run_cli(
+        app,
+        "schedule",
+        fits_path,
+        ecsv_path,
+        "--mission=uvex",
+        "--bandpass=NUV",
+        "--nside=32",
+        "--deadline=2hour",
+        "--timelimit=10s",
+        "--no-appmag-dist",
+        "--event-time=2026-03-01T00:00:00",
+    )
+    assert result.exit_code == 0
+    assert QTable.read(ecsv_path).meta["args"]["event_time"] == (
+        "2026-03-01T00:00:00.000"
+    )
+
+
+def test_max_fields_limits_the_problem(fits_path, ecsv_path, run_cli):
+    """No more fields are scheduled than the cap allows."""
+    max_fields = 3
+    result = run_cli(
+        app,
+        "schedule",
+        fits_path,
+        ecsv_path,
+        "--mission=uvex",
+        "--bandpass=NUV",
+        "--nside=32",
+        "--deadline=8hour",
+        "--timelimit=30s",
+        "--no-appmag-dist",
+        f"--max-fields={max_fields}",
+    )
+    assert result.exit_code == 0
+    table = QTable.read(ecsv_path)
+    observations = table[table["action"] == "observe"]
+    assert len(unique(observations["target_coord"].to_table())) <= max_fields
+    assert table.meta["args"]["max_fields"] == max_fields

@@ -5,6 +5,51 @@ Changes
 2.12.1 (unreleased)
 ===================
 
+- Return no solution from SCIP when an objective cutoff rules one out, rather
+  than a schedule that the cutoff rejects.
+
+- Add SCIP as a MILP solver backend, selected automatically if neither CPLEX
+  nor Gurobi is installed, or explicitly with ``M4OPT_SOLVER=scip``. SCIP is
+  open source under the Apache 2.0 license, so it can be deployed where an
+  academic CPLEX or Gurobi license does not reach. Install it with ``pip
+  install "m4opt[scip]"``.
+
+- Add Gurobi as an alternative MILP solver backend. The solver is selected
+  automatically from whichever of ``cplex`` or ``gurobipy`` is installed,
+  preferring CPLEX, and can be chosen explicitly with the ``M4OPT_SOLVER``
+  environment variable or :func:`m4opt.milp.set_backend`. Install the solver of
+  your choice with ``pip install "m4opt[cplex]"`` or ``pip install
+  "m4opt[gurobi]"``.
+
+- Fix the ZTF sky grid, whose right ascensions were truncated by a fixed-width
+  table reader so that all 1778 fields fell within 10 degrees of R.A. 0. ZTF
+  schedules were empty as a result.
+
+- Allow ``--bandpass`` to be repeated so that successive visits cycle through
+  several bandpasses. Visits are grouped into contiguous blocks of a single
+  bandpass, so a schedule exchanges the filter only once per block boundary.
+
+- Add ``Mission.filter_exchange_time`` and set it to 110 s for ZTF.
+
+- Name the field that each observation points at. Schedules gain a
+  ``field_index`` column giving the row in the mission's sky grid, and a
+  ``field_id`` column giving the mission's own identifier for missions that
+  name their fields. ZTF's identifiers are read from its field list; they run
+  from 1 to 1897 with gaps, so they cannot be inferred from position.
+
+- Add ``--event-time``, the time that ``--delay`` and ``--deadline`` are
+  measured from. It defaults to the ``gps_time`` in the sky map header as
+  before, so a sky map generated without one can now be scheduled, and a sky
+  map missing it reports what to do rather than a ``KeyError``.
+
+- Add ``--max-fields``, the number of most probable fields to consider. It
+  was fixed at 50, which silently truncated the problem for instruments whose
+  sky grid covers a localization with more fields than that.
+
+- Record ``has_observable_fields`` and ``has_solution`` in the schedule
+  metadata. An empty schedule previously gave no way to tell a sky that was
+  never observable from a solve that ran out of time.
+
 - Use ULTRASAT's tabulated throughput curve rather than a Gaussian
   approximation, which had a red leak some four orders of magnitude too
   large and nearly doubled the predicted zodiacal background.
