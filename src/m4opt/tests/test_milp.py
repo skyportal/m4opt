@@ -15,6 +15,10 @@ problem_size_limits = pytest.mark.parametrize(
 
 backend = _get_backend()
 cplex_only = pytest.mark.skipif(backend != "cplex", reason="CPLEX-only test")
+scip_only = pytest.mark.skipif(backend != "scip", reason="SCIP-only test")
+no_stallnodes = pytest.mark.skipif(
+    backend == "scip", reason="only CPLEX and Gurobi lack a stall-node limit"
+)
 
 
 @pytest.fixture
@@ -276,3 +280,67 @@ def test_default_variable_bounds(m, vartype):
     """A variable created without bounds is non-negative, not free."""
     x = getattr(m, f"{vartype}_vars")(3)
     assert all(v.lb == 0 for v in x)
+
+
+def _hard_knapsack(m, n=60, seed=1):
+    """A strongly correlated knapsack, which branch and bound explores slowly."""
+    rng = np.random.default_rng(seed)
+    weights = rng.integers(10**6, 2 * 10**6, n)
+    values = weights + 10**6
+    x = m.binary_vars(n)
+    m.add_constraint_(
+        m.scal_prod_vars_all_different(x, weights.astype(float))
+        <= float(weights.sum() // 2)
+    )
+    m.maximize(m.scal_prod_vars_all_different(x, values.astype(float)))
+
+
+@scip_only
+def test_default_limits_are_unset():
+    """Callers that ask for no early stopping get the solver's own defaults."""
+    with Model(verbose=False) as m:
+        assert m._scip.getParam("limits/stallnodes") == -1
+        assert m._scip.getParam("limits/gap") == 0.0
+
+
+@scip_only
+def test_stallnodes_ends_the_solve_without_losing_the_incumbent():
+    """A stall limit ends the search once it stops improving, not before."""
+    with Model(verbose=False) as unlimited:
+        _hard_knapsack(unlimited)
+        best = unlimited.solve().get_objective_value()
+        assert unlimited.solve_details.status == "optimal"
+        nodes = unlimited._scip.getNNodes()
+
+    with Model(stallnodes=50, verbose=False) as limited:
+        _hard_knapsack(limited)
+        assert limited.solve().get_objective_value() == best
+        assert limited.solve_details.status == "stallnodelimit"
+        assert limited._scip.getNNodes() < nodes
+
+
+@scip_only
+def test_stalltime_ends_the_solve_once_it_stops_improving():
+    """A stall time ends the search and says so, keeping the incumbent."""
+    with Model(stalltime=0.05 * u.s, verbose=False) as m:
+        _hard_knapsack(m)
+        assert m.solve() is not None
+        assert m.solve_details.status == "stalled, no improvement"
+
+
+@scip_only
+def test_gap_ends_the_solve_once_the_bound_is_close_enough():
+    """A gap tolerance stops a solve that would otherwise prove optimality."""
+    with Model(gap=0.02, verbose=False) as m:
+        _hard_knapsack(m)
+        m.solve()
+        assert m.solve_details.status == "gaplimit"
+
+
+@no_stallnodes
+def test_stallnodes_is_refused_where_it_is_not_supported():
+    """A stall limit the backend cannot honor is an error, not a silent no-op."""
+    with pytest.raises(NotImplementedError, match="stall limit"):
+        Model(stallnodes=50, verbose=False)
+    with pytest.raises(NotImplementedError, match="stall limit"):
+        Model(stalltime=1 * u.s, verbose=False)

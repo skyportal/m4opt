@@ -89,6 +89,9 @@ class CplexModel(_Model):
         jobs: int = 0,
         memory: u.Quantity[u.physical.data_quantity] = np.inf * u.byte,
         lowercutoff: float | None = None,
+        stallnodes: int | None = None,
+        stalltime: u.Quantity[u.physical.time] | None = None,
+        gap: float | None = None,
         verbose=True,
     ):
         """Initialize a model with default `CPLEX parameters`_ for M4OPT.
@@ -107,6 +110,15 @@ class CplexModel(_Model):
         lowercutoff
             Optional lower cutoff. Terminate the solver if the best bound drops
             below this value.
+        stallnodes
+            Not supported by CPLEX. Passing anything but `None` raises
+            `NotImplementedError` rather than silently letting the solver run
+            past the limit the caller asked for.
+        stalltime
+            Not supported by CPLEX, as above.
+        gap
+            Give up once the relative gap between the incumbent and the best
+            bound falls to this value. Default: only stop at a proven optimum.
         verbose
             Display live solver progress.
 
@@ -128,6 +140,11 @@ class CplexModel(_Model):
         .. _`solution pool`: https://www.ibm.com/docs/en/icos/22.1.1?topic=parameters-maximum-number-solutions-kept-in-solution-pool
         .. _`opportunistic parallelism`: https://www.ibm.com/docs/en/icos/22.1.1?topic=parameters-parallel-mode-switch
         """
+        if stallnodes is not None or stalltime is not None:
+            raise NotImplementedError(
+                "CPLEX has no stall limit; use the SCIP backend instead."
+            )
+
         super().__init__()
 
         self.abs: Callable[[npt.ArrayLike], npt.ArrayLike] = np.vectorize(
@@ -147,6 +164,9 @@ class CplexModel(_Model):
         # Disable the solution pool. We are not examining multiple solutions,
         # and the solution pool can grow to take up a lot of memory.
         self.context.cplex_parameters.mip.pool.capacity = 0
+
+        if gap is not None:
+            self.context.cplex_parameters.mip.tolerances.mipgap = gap
 
         timelimit_s = timelimit.to_value(u.s)
         if timelimit_s < 1e75:

@@ -277,6 +277,30 @@ def schedule(
             rich_help_panel="Solver Options",
         ),
     ] = None,
+    stallnodes: Annotated[
+        int | None,
+        typer.Option(
+            min=1,
+            help="Give up after this many branch-and-bound nodes that do not improve on the best schedule found so far. Useful when the solver stops making progress long before the time limit",
+            rich_help_panel="Solver Options",
+        ),
+    ] = None,
+    stalltime: Annotated[
+        u.Quantity,
+        typer.Option(
+            help="Give up after this much time with no improvement on the best schedule found so far. Preferred over --stallnodes, which is too coarse when only a few nodes are solved per minute",
+            rich_help_panel="Solver Options",
+        ),
+    ] = np.inf * u.s,
+    gap: Annotated[
+        float | None,
+        typer.Option(
+            min=0,
+            max=1,
+            help="Give up once the relative gap between the best schedule found and the best bound falls to this value",
+            rich_help_panel="Solver Options",
+        ),
+    ] = None,
     write_progress: Annotated[
         typer.FileTextWrite | None,
         typer.Option(
@@ -550,7 +574,13 @@ def schedule(
         ).to_value(u.s)
 
     with Model(
-        timelimit=timelimit, jobs=jobs, memory=memory, lowercutoff=cutoff
+        timelimit=timelimit,
+        jobs=jobs,
+        memory=memory,
+        lowercutoff=cutoff,
+        stallnodes=stallnodes,
+        stalltime=stalltime if np.isfinite(stalltime) else None,
+        gap=gap,
     ) as model:
         with status("assembling MILP model"):
             if adaptive_exptime and appmag_dist:
@@ -827,6 +857,9 @@ def schedule(
                         "bandpass": visit_bandpasses,
                         "snr": snr,
                         "cutoff": cutoff,
+                        "stallnodes": stallnodes,
+                        "stalltime": stalltime,
+                        "gap": gap,
                     },
                     "objective_value": objective_value,
                     # An empty schedule means either that nothing was

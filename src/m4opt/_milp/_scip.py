@@ -208,6 +208,45 @@ class _ProgressEventHandler(Eventhdlr):
             return
 
 
+class _StallEventHandler(Eventhdlr):
+    """Interrupt the solve once the incumbent has gone unimproved for too long.
+
+    SCIP's own ``limits/stallnodes`` counts nodes, but these models are heavy
+    enough that only a handful of nodes are explored per minute, so a node
+    count is too coarse to express "stop once it stops getting better".
+    """
+
+    def __init__(self, stalltime_s):
+        super().__init__()
+        self._stalltime_s = stalltime_s
+        self._last_improved = 0.0
+        self.interrupted = False
+
+    def eventinit(self):
+        self.model.catchEvent(SCIP_EVENTTYPE.BESTSOLFOUND, self)
+        self.model.catchEvent(SCIP_EVENTTYPE.NODESOLVED, self)
+
+    def eventexit(self):
+        self.model.dropEvent(SCIP_EVENTTYPE.BESTSOLFOUND, self)
+        self.model.dropEvent(SCIP_EVENTTYPE.NODESOLVED, self)
+
+    def eventexec(self, event):
+        # An exception raised here aborts the solve, and not every event fires
+        # in a stage where the statistics can be queried.
+        try:
+            now = self.model.getSolvingTime()
+            if event.getType() == SCIP_EVENTTYPE.BESTSOLFOUND:
+                self._last_improved = now
+            elif (
+                self.model.getNSols() > 0
+                and now - self._last_improved >= self._stalltime_s
+            ):
+                self.interrupted = True
+                self.model.interruptSolve()
+        except Exception:  # noqa: BLE001
+            return
+
+
 def _flatten_constraints(cts):
     """Normalize one constraint, or any container of them, to a flat sequence."""
     if isinstance(cts, (scip.scip.ExprCons, SCIPEqualityProxy)):
@@ -226,10 +265,43 @@ class SCIPModel:
         jobs=0,
         memory=np.inf * u.MiB,
         lowercutoff=None,
+        stallnodes=None,
+        stalltime=None,
+        gap=None,
         verbose=True,
     ):
+        """Initialize a model with default SCIP parameters for M4OPT.
+
+        Parameters
+        ----------
+        timelimit
+            Maximum solver run time.
+        jobs
+            Number of threads, or 0 to choose automatically.
+        memory
+            Maximum memory usage before terminating the solver.
+        lowercutoff
+            Optional lower cutoff. Terminate the solver if the best bound drops
+            below this value.
+        stallnodes
+            Give up after this many branch-and-bound nodes that do not improve
+            on the incumbent. Default: no limit.
+        stalltime
+            Give up once this much time has passed without improving on the
+            incumbent. On models whose relaxation is too weak for the bound to
+            descend, the solver would otherwise run to its time limit long
+            after it has stopped making progress. Prefer this to `stallnodes`,
+            which is too coarse when only a few nodes are solved per minute.
+            Default: no limit.
+        gap
+            Give up once the relative gap between the incumbent and the best
+            bound falls to this value. Default: only stop at a proven optimum.
+        verbose
+            Display live solver progress.
+        """
         self._scip = scip.Model()
         self._progress_handler = None
+        self._stall_handler = None
         self._solve_details = None
         self.abs = np.vectorize(self._abs_scalar, otypes=[object])
 
@@ -239,9 +311,28 @@ class SCIPModel:
         timelimit_s = timelimit.to_value(u.s)
         if timelimit_s < 1e75:
             self._scip.setParam("limits/time", timelimit_s)
+
+        if stallnodes is not None:
+            self._scip.setParam("limits/stallnodes", stallnodes)
+
+        if gap is not None:
+            self._scip.setParam("limits/gap", gap)
+
+        if stalltime is not None:
+            self._stall_handler = _StallEventHandler(stalltime.to_value(u.s))
+            self._scip.includeEventhdlr(
+                self._stall_handler, "m4optStall", "stops an unimproving search"
+            )
+
+        if (
+            timelimit_s < 1e75
+            or stallnodes is not None
+            or stalltime is not None
+            or gap is not None
+        ):
             # SCIP finds no feasible solution at all on these models with its
             # default settings, so it is pushed towards feasibility whenever
-            # the search is time limited.
+            # the search is cut short.
             self._scip.setEmphasis(SCIP_PARAMEMPHASIS.FEASIBILITY)
             self._scip.setHeuristics(SCIP_PARAMSETTING.AGGRESSIVE)
 
@@ -554,6 +645,9 @@ class SCIPModel:
                 status="aborted, lower cutoff reached", time=solving_time
             )
             return None
+
+        if self._stall_handler is not None and self._stall_handler.interrupted:
+            status_str = "stalled, no improvement"
 
         self._solve_details = SolveDetails(status=status_str, time=solving_time)
         if self._scip.getNSols() == 0:

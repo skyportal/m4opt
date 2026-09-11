@@ -194,6 +194,9 @@ class GurobiModel:
         jobs: int = 0,
         memory: u.Quantity[u.physical.data_quantity] = np.inf * u.byte,
         lowercutoff: float | None = None,
+        stallnodes: int | None = None,
+        stalltime: u.Quantity[u.physical.time] | None = None,
+        gap: float | None = None,
         verbose=True,
     ):
         """Initialize a model with default Gurobi parameters for M4OPT.
@@ -212,9 +215,23 @@ class GurobiModel:
         lowercutoff
             Optional lower cutoff. Terminate the solver if the best bound drops
             below this value.
+        stallnodes
+            Not supported by Gurobi. Passing anything but `None` raises
+            `NotImplementedError` rather than silently letting the solver run
+            past the limit the caller asked for.
+        stalltime
+            Not supported by Gurobi, as above.
+        gap
+            Give up once the relative gap between the incumbent and the best
+            bound falls to this value. Default: only stop at a proven optimum.
         verbose
             Display live solver progress.
         """
+        if stallnodes is not None or stalltime is not None:
+            raise NotImplementedError(
+                "Gurobi has no stall limit; use the SCIP backend instead."
+            )
+
         self._grb = gp.Model()
 
         # Vectorize abs
@@ -223,6 +240,9 @@ class GurobiModel:
         # Configure parameters
         self._grb.Params.LogToConsole = 1 if verbose else 0
         self._grb.Params.Threads = jobs
+
+        if gap is not None:
+            self._grb.Params.MIPGap = gap
 
         timelimit_s = timelimit.to_value(u.s)
         if timelimit_s < 1e75:

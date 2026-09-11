@@ -5,6 +5,18 @@ Changes
 2.12.1 (unreleased)
 ===================
 
+- Add ``--stalltime``, ``--stallnodes`` and ``--gap`` to stop a solve that is
+  no longer making progress. On models whose relaxation is too weak for the
+  bound to descend, the solver cannot prove optimality and so runs to its time
+  limit long after it has stopped improving the schedule. ``--stalltime``
+  gives up after that much time with no improvement, ``--stallnodes`` after
+  that many branch-and-bound nodes with none, and ``--gap`` once the incumbent
+  comes within that relative gap of the bound. Prefer ``--stalltime``: a
+  scheduling model solves only a few nodes per minute, too coarse a unit in
+  which to express giving up. None is set by default, so a caller that asks
+  for none keeps the previous behaviour, and the schedule's
+  ``solution_status`` says which limit ended the search.
+
 - Return no solution from SCIP when an objective cutoff rules one out, rather
   than a schedule that the cutoff rejects.
 

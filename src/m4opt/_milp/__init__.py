@@ -90,7 +90,8 @@ def Model(**kwargs):
     ----------
     **kwargs
         Keyword arguments forwarded to the backend Model constructor
-        (``timelimit``, ``jobs``, ``memory``, ``lowercutoff``, ``verbose``).
+        (``timelimit``, ``jobs``, ``memory``, ``lowercutoff``, ``stallnodes``,
+        ``gap``, ``verbose``).
 
     Returns
     -------
